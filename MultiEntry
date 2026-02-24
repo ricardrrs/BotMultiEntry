@@ -44,6 +44,10 @@ input bool     MonitorarMS3 = true;
 input bool     MonitorarS3 = true;
 
 // Variáveis globais
+const int MAX_LEVELS = 20;
+const int MAX_TRACKED_TRADES = 10;
+const int MAX_TRACKED_POSITIONS = 50;
+
 double tickSize;
 double entryStep;
 double consolidationDistance;
@@ -78,7 +82,7 @@ struct TradeEntry {
    bool active;
 };
 
-TradeEntry tradesAbertos[10]; // Suporte para até 10 trades
+TradeEntry tradesAbertos[MAX_TRACKED_TRADES]; // Suporte para até 10 trades
 int totalTradesAbertos = 0;
 
 // Estrutura para níveis de Pivot
@@ -106,7 +110,7 @@ struct LevelInfo {
    bool monitoring;
 };
 
-LevelInfo levels[20];
+LevelInfo levels[MAX_LEVELS];
 int totalLevels = 0;
 
 // Estrutura para controle de posições
@@ -122,7 +126,7 @@ struct PositionInfo {
    int tradeNumber; // Número do trade (1-5)
 };
 
-PositionInfo openPositions[50];
+PositionInfo openPositions[MAX_TRACKED_POSITIONS];
 int totalPositions = 0;
 
 // Variáveis de estado
@@ -212,6 +216,8 @@ void SetupLevels()
 //+------------------------------------------------------------------+
 void AddLevel(double level, string name, bool isResistance)
 {
+   if(totalLevels >= MAX_LEVELS) return;
+
    levels[totalLevels].level = level;
    levels[totalLevels].name = name;
    levels[totalLevels].isResistance = isResistance;
@@ -221,6 +227,17 @@ void AddLevel(double level, string name, bool isResistance)
    levels[totalLevels].monitoring = true;
    levels[totalLevels].tradeCount = 0;
    totalLevels++;
+}
+
+//+------------------------------------------------------------------+
+//| Função para validar posição por símbolo e magic                 |
+//+------------------------------------------------------------------+
+bool IsManagedPosition(ulong ticket)
+{
+   if(!PositionSelectByTicket(ticket)) return false;
+
+   return PositionGetString(POSITION_SYMBOL) == _Symbol &&
+          PositionGetInteger(POSITION_MAGIC) == MagicNumber;
 }
 
 //+------------------------------------------------------------------+
@@ -247,9 +264,9 @@ int ExtractTradeNumber(string comment)
 void UpdatePositionsList()
 {
    // Preservar estado de trailing entre ticks
-   PositionInfo previousPositions[50];
+   PositionInfo previousPositions[MAX_TRACKED_POSITIONS];
    int previousTotal = totalPositions;
-   for(int j = 0; j < previousTotal && j < 50; j++)
+   for(int j = 0; j < previousTotal && j < MAX_TRACKED_POSITIONS; j++)
    {
       previousPositions[j] = openPositions[j];
    }
@@ -262,62 +279,61 @@ void UpdatePositionsList()
    for(int i = PositionsTotal() - 1; i >= 0; i--)
    {
       ulong ticket = PositionGetTicket(i);
-      if(PositionSelectByTicket(ticket))
+      if(IsManagedPosition(ticket))
       {
-         if(PositionGetString(POSITION_SYMBOL) == _Symbol &&
-            PositionGetInteger(POSITION_MAGIC) == MagicNumber)
-         {
-            openPositions[totalPositions].ticket = ticket;
-            openPositions[totalPositions].entryPrice = PositionGetDouble(POSITION_PRICE_OPEN);
-            openPositions[totalPositions].initialSL = PositionGetDouble(POSITION_SL);
-            openPositions[totalPositions].currentSL = openPositions[totalPositions].initialSL;
-            
-            long type = PositionGetInteger(POSITION_TYPE);
-            if(type == POSITION_TYPE_BUY)
-            {
-               openPositions[totalPositions].direction = 1;
-               currentDirection = DIR_BUY;
-            }
-            else
-            {
-               openPositions[totalPositions].direction = -1;
-               currentDirection = DIR_SELL;
-            }
-            
-            openPositions[totalPositions].bestPrice = openPositions[totalPositions].entryPrice;
-            openPositions[totalPositions].trailingActive = false;
-            openPositions[totalPositions].trailingStepCount = 0;
+         if(totalPositions >= MAX_TRACKED_POSITIONS)
+            break;
 
-            // Restaurar dados de trailing já calculados para o ticket
-            for(int j = 0; j < previousTotal; j++)
-            {
-               if(previousPositions[j].ticket == ticket)
-               {
-                  openPositions[totalPositions].bestPrice = previousPositions[j].bestPrice;
-                  openPositions[totalPositions].trailingActive = previousPositions[j].trailingActive;
-                  openPositions[totalPositions].trailingStepCount = previousPositions[j].trailingStepCount;
-                  break;
-               }
-            }
-            
-            // Extrair número do trade do comentário
-            string comment = PositionGetString(POSITION_COMMENT);
-            int tradeNum = ExtractTradeNumber(comment);
-            openPositions[totalPositions].tradeNumber = tradeNum;
-            
-            // Armazenar no array de trades abertos
-            if(totalTradesAbertos < 10)
-            {
-               tradesAbertos[totalTradesAbertos].price = openPositions[totalPositions].entryPrice;
-               tradesAbertos[totalTradesAbertos].tradeNumber = tradeNum;
-               tradesAbertos[totalTradesAbertos].ticket = ticket;
-               tradesAbertos[totalTradesAbertos].active = true;
-               totalTradesAbertos++;
-            }
-            
-            totalPositions++;
-            hasPosition = true;
+         openPositions[totalPositions].ticket = ticket;
+         openPositions[totalPositions].entryPrice = PositionGetDouble(POSITION_PRICE_OPEN);
+         openPositions[totalPositions].initialSL = PositionGetDouble(POSITION_SL);
+         openPositions[totalPositions].currentSL = openPositions[totalPositions].initialSL;
+
+         long type = PositionGetInteger(POSITION_TYPE);
+         if(type == POSITION_TYPE_BUY)
+         {
+            openPositions[totalPositions].direction = 1;
+            currentDirection = DIR_BUY;
          }
+         else
+         {
+            openPositions[totalPositions].direction = -1;
+            currentDirection = DIR_SELL;
+         }
+
+         openPositions[totalPositions].bestPrice = openPositions[totalPositions].entryPrice;
+         openPositions[totalPositions].trailingActive = false;
+         openPositions[totalPositions].trailingStepCount = 0;
+
+         // Restaurar dados de trailing já calculados para o ticket
+         for(int j = 0; j < previousTotal; j++)
+         {
+            if(previousPositions[j].ticket == ticket)
+            {
+               openPositions[totalPositions].bestPrice = previousPositions[j].bestPrice;
+               openPositions[totalPositions].trailingActive = previousPositions[j].trailingActive;
+               openPositions[totalPositions].trailingStepCount = previousPositions[j].trailingStepCount;
+               break;
+            }
+         }
+
+         // Extrair número do trade do comentário
+         string comment = PositionGetString(POSITION_COMMENT);
+         int tradeNum = ExtractTradeNumber(comment);
+         openPositions[totalPositions].tradeNumber = tradeNum;
+
+         // Armazenar no array de trades abertos
+         if(totalTradesAbertos < MAX_TRACKED_TRADES)
+         {
+            tradesAbertos[totalTradesAbertos].price = openPositions[totalPositions].entryPrice;
+            tradesAbertos[totalTradesAbertos].tradeNumber = tradeNum;
+            tradesAbertos[totalTradesAbertos].ticket = ticket;
+            tradesAbertos[totalTradesAbertos].active = true;
+            totalTradesAbertos++;
+         }
+
+         totalPositions++;
+         hasPosition = true;
       }
    }
 }
@@ -496,13 +512,9 @@ double CalculateTotalProfit()
    for(int i = PositionsTotal() - 1; i >= 0; i--)
    {
       ulong ticket = PositionGetTicket(i);
-      if(PositionSelectByTicket(ticket))
+      if(IsManagedPosition(ticket))
       {
-         if(PositionGetString(POSITION_SYMBOL) == _Symbol &&
-            PositionGetInteger(POSITION_MAGIC) == MagicNumber)
-         {
-            total += PositionGetDouble(POSITION_PROFIT);
-         }
+         total += PositionGetDouble(POSITION_PROFIT);
       }
    }
    return total;
@@ -557,31 +569,25 @@ void CloseAllPositions()
    for(int i = PositionsTotal() - 1; i >= 0; i--)
    {
       ulong ticket = PositionGetTicket(i);
-      if(PositionSelectByTicket(ticket))
+      if(IsManagedPosition(ticket))
       {
-         if(PositionGetString(POSITION_SYMBOL) == _Symbol &&
-            PositionGetInteger(POSITION_MAGIC) == MagicNumber)
-         {
-            ClosePosition(ticket);
-         }
+         ClosePosition(ticket);
       }
    }
 }
 
 //+------------------------------------------------------------------+
-//| Função para enviar ordem de COMPRA                               |
+//| Função para enviar ordem de mercado                              |
 //+------------------------------------------------------------------+
-void SendBuyOrder(double price, string levelName, int tradeNum)
+bool SendMarketOrder(ENUM_ORDER_TYPE orderType, double price, double stopLoss, string comment)
 {
    MqlTradeRequest request;
    MqlTradeResult result;
    ZeroMemory(request);
    ZeroMemory(result);
-   
-   double stopLoss = price - stopLossSize;
-   
+
    request.action = TRADE_ACTION_DEAL;
-   request.type = ORDER_TYPE_BUY;
+   request.type = orderType;
    request.symbol = _Symbol;
    request.volume = VolumePorEntrada;
    request.price = NormalizeDouble(price, _Digits);
@@ -589,9 +595,19 @@ void SendBuyOrder(double price, string levelName, int tradeNum)
    request.tp = 0;
    request.deviation = Slippage;
    request.magic = MagicNumber;
-   request.comment = levelName + " C" + IntegerToString(tradeNum);
-   
-   if(OrderSend(request, result))
+   request.comment = comment;
+
+   return OrderSend(request, result);
+}
+
+//+------------------------------------------------------------------+
+//| Função para enviar ordem de COMPRA                               |
+//+------------------------------------------------------------------+
+void SendBuyOrder(double price, string levelName, int tradeNum)
+{
+   double stopLoss = price - stopLossSize;
+
+   if(SendMarketOrder(ORDER_TYPE_BUY, price, stopLoss, levelName + " C" + IntegerToString(tradeNum)))
    {
       tradesFeitos++;
       Print(">>> COMPRA #", tradeNum, "/", MaximoTrades, " em ", price, " | SL: ", stopLoss);
@@ -607,25 +623,9 @@ void SendBuyOrder(double price, string levelName, int tradeNum)
 //+------------------------------------------------------------------+
 void SendSellOrder(double price, string levelName, int tradeNum)
 {
-   MqlTradeRequest request;
-   MqlTradeResult result;
-   ZeroMemory(request);
-   ZeroMemory(result);
-   
    double stopLoss = price + stopLossSize;
-   
-   request.action = TRADE_ACTION_DEAL;
-   request.type = ORDER_TYPE_SELL;
-   request.symbol = _Symbol;
-   request.volume = VolumePorEntrada;
-   request.price = NormalizeDouble(price, _Digits);
-   request.sl = NormalizeDouble(stopLoss, _Digits);
-   request.tp = 0;
-   request.deviation = Slippage;
-   request.magic = MagicNumber;
-   request.comment = levelName + " V" + IntegerToString(tradeNum);
-   
-   if(OrderSend(request, result))
+
+   if(SendMarketOrder(ORDER_TYPE_SELL, price, stopLoss, levelName + " V" + IntegerToString(tradeNum)))
    {
       tradesFeitos++;
       Print(">>> VENDA #", tradeNum, "/", MaximoTrades, " em ", price, " | SL: ", stopLoss);
@@ -662,6 +662,8 @@ void ResetTrade()
 //+------------------------------------------------------------------+
 void OnTick()
 {
+   bool hadPosition = hasPosition;
+
    // Atualizar posições
    UpdatePositionsList();
    
@@ -687,7 +689,7 @@ void OnTick()
    }
    
    // Se não tem posições, resetar
-   if(totalPositions == 0 && hasPosition)
+   if(totalPositions == 0 && hadPosition)
    {
       ResetTrade();
    }
