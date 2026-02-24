@@ -68,6 +68,7 @@ bool hasPosition = false;
 int activatedLevelIndex = -1;
 double nextEntryPrice = 0;
 int tradesFeitos = 0;
+double firstTradePrice = 0;
 
 // Array para armazenar preços de entrada de cada trade
 struct TradeEntry {
@@ -645,6 +646,7 @@ void ResetTrade()
    activatedLevelIndex = -1;
    tradesFeitos = 0;
    nextEntryPrice = 0;
+   firstTradePrice = 0;
    totalTradesAbertos = 0;
    
    for(int i = 0; i < totalLevels; i++)
@@ -715,6 +717,15 @@ void OnTick()
    if(hasPosition && activatedLevelIndex >= 0)
    {
       int idx = activatedLevelIndex;
+
+      // Próxima entrada sempre baseada no preço do 1º trade
+      if(firstTradePrice > 0)
+      {
+         if(currentDirection == DIR_BUY)
+            nextEntryPrice = firstTradePrice + (entryStep * levels[idx].tradeCount);
+         else if(currentDirection == DIR_SELL)
+            nextEntryPrice = firstTradePrice - (entryStep * levels[idx].tradeCount);
+      }
       
       // VERIFICAÇÃO CRÍTICA: Já atingiu o máximo de trades?
       if(levels[idx].tradeCount >= MaximoTrades)
@@ -731,7 +742,6 @@ void OnTick()
                int nextTradeNum = levels[idx].tradeCount + 1;
                SendBuyOrder(ask, levels[idx].name, nextTradeNum);
                levels[idx].tradeCount++;
-               nextEntryPrice += entryStep;
                
                if(levels[idx].tradeCount >= MaximoTrades)
                   Print(">>> LIMITE MÁXIMO DE ", MaximoTrades, " TRADES ATINGIDO PARA ", levels[idx].name);
@@ -748,7 +758,6 @@ void OnTick()
                int nextTradeNum = levels[idx].tradeCount + 1;
                SendSellOrder(bid, levels[idx].name, nextTradeNum);
                levels[idx].tradeCount++;
-               nextEntryPrice -= entryStep;
                
                if(levels[idx].tradeCount >= MaximoTrades)
                   Print(">>> LIMITE MÁXIMO DE ", MaximoTrades, " TRADES ATINGIDO PARA ", levels[idx].name);
@@ -778,9 +787,11 @@ void OnTick()
             activatedLevelIndex = i;
             currentDirection = DIR_BUY;
             hasPosition = true;
+            tradesFeitos = 0;
             
             // EXECUTAR PRIMEIRA COMPRA
             double entryPrice = ask;
+            firstTradePrice = entryPrice;
             nextEntryPrice = entryPrice + entryStep;
             
             Print(">>> EXECUTANDO 1º TRADE (COMPRA)");
@@ -804,9 +815,11 @@ void OnTick()
             activatedLevelIndex = i;
             currentDirection = DIR_SELL;
             hasPosition = true;
+            tradesFeitos = 0;
             
             // EXECUTAR PRIMEIRA VENDA
             double entryPrice = bid;
+            firstTradePrice = entryPrice;
             nextEntryPrice = entryPrice - entryStep;
             
             Print(">>> EXECUTANDO 1º TRADE (VENDA)");
