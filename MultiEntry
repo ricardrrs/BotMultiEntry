@@ -227,6 +227,14 @@ void AddLevel(double level, string name, bool isResistance)
 //+------------------------------------------------------------------+
 void UpdatePositionsList()
 {
+   // Preservar estado de trailing entre ticks
+   PositionInfo previousPositions[50];
+   int previousTotal = totalPositions;
+   for(int j = 0; j < previousTotal && j < 50; j++)
+   {
+      previousPositions[j] = openPositions[j];
+   }
+
    totalPositions = 0;
    hasPosition = false;
    currentDirection = DIR_NONE;
@@ -260,6 +268,18 @@ void UpdatePositionsList()
             openPositions[totalPositions].bestPrice = openPositions[totalPositions].entryPrice;
             openPositions[totalPositions].trailingActive = false;
             openPositions[totalPositions].trailingStepCount = 0;
+
+            // Restaurar dados de trailing já calculados para o ticket
+            for(int j = 0; j < previousTotal; j++)
+            {
+               if(previousPositions[j].ticket == ticket)
+               {
+                  openPositions[totalPositions].bestPrice = previousPositions[j].bestPrice;
+                  openPositions[totalPositions].trailingActive = previousPositions[j].trailingActive;
+                  openPositions[totalPositions].trailingStepCount = previousPositions[j].trailingStepCount;
+                  break;
+               }
+            }
             
             // Extrair número do trade do comentário
             string comment = PositionGetString(POSITION_COMMENT);
@@ -402,10 +422,13 @@ void ApplyTrailingStop()
          if(currentStep > openPositions[i].trailingStepCount)
          {
             double newSL = 0;
+            double distanceToSL = stopLossSize - (trailingMove * currentStep);
+            if(distanceToSL < tickSize)
+               distanceToSL = tickSize;
             
             if(openPositions[i].direction == 1)
             {
-               newSL = openPositions[i].bestPrice - (stopLossSize - (trailingMove * currentStep));
+               newSL = openPositions[i].bestPrice - distanceToSL;
                if(newSL > currentSL && newSL < currentPrice)
                {
                   ModifyPositionSL(ticket, newSL);
@@ -416,7 +439,7 @@ void ApplyTrailingStop()
             }
             else
             {
-               newSL = openPositions[i].bestPrice + (stopLossSize - (trailingMove * currentStep));
+               newSL = openPositions[i].bestPrice + distanceToSL;
                if(newSL < currentSL && newSL > currentPrice)
                {
                   ModifyPositionSL(ticket, newSL);
