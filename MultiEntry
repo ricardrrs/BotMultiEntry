@@ -1,0 +1,804 @@
+//+------------------------------------------------------------------+
+//|                                             MultiEntry_v4.mq5    |
+//|                                         Copyright 2026, Ricard   |
+//|                                     https://www.yourwebsite.com  |
+//+------------------------------------------------------------------+
+#property copyright "Copyright 2026"
+#property link      "https://www.ricard.com"
+#property version   "4.00"
+
+// Input parameters
+input double   VolumePorEntrada = 0.02;       // Volume por cada entrada
+input double   DistanciaEntreEntradas = 5.0; // Distância entre entradas (pontos)
+input int      MaximoTrades = 10;               // Máximo de trades por consolidação
+input double   DistanciaConsolidacao = 500.0; // Distância da consolidação (pontos)
+input int      MagicNumber = 20264;           // Magic Number
+input int      Slippage = 3;                   // Slippage em pontos
+
+// Parâmetros de entrada
+input double   StopLossPontos = 30.0;          // Stop Loss individual (pontos)
+
+// Parâmetros de TRAILING STOP
+input bool     UsarTrailingStop = true;        // Ativar trailing stop
+input double   TrailingAtivacaoPontos = 150.0;  // Pontos para ativar trailing
+input double   TrailingStepPontos = 130.0;      // Passo do trailing (pontos)
+input double   TrailingPercentual = 90.0;      // % do stop para mover
+
+// Meta em dinheiro
+input double   MetaLucro = 3000.0;               // Meta de lucro
+input double   StopLossGeral = 1000.0;           // Stop Loss geral
+
+// Seleção de níveis PIVOT
+input bool     MonitorarP = true;
+input bool     MonitorarMR1 = true;
+input bool     MonitorarR1 = true;
+input bool     MonitorarMR2 = true;
+input bool     MonitorarR2 = true;
+input bool     MonitorarMR3 = true;
+input bool     MonitorarR3 = true;
+input bool     MonitorarMS1 = true;
+input bool     MonitorarS1 = true;
+input bool     MonitorarMS2 = true;
+input bool     MonitorarS2 = true;
+input bool     MonitorarMS3 = true;
+input bool     MonitorarS3 = true;
+
+// Variáveis globais
+double tickSize;
+double entryStep;
+double consolidationDistance;
+double stopLossSize;
+double trailingActivation;
+double trailingStep;
+double trailingMove;
+string accountCurrency;
+datetime lastPivotUpdate = 0;
+
+// Controle de direção
+enum ENUM_TRADE_DIRECTION {
+   DIR_NONE,
+   DIR_BUY,
+   DIR_SELL
+};
+
+ENUM_TRADE_DIRECTION currentDirection = DIR_NONE;
+double currentPivotLevel = 0;
+string currentPivotName = "";
+bool hasPosition = false;
+int activatedLevelIndex = -1;
+double nextEntryPrice = 0;
+int tradesFeitos = 0;
+
+// Array para armazenar preços de entrada de cada trade
+struct TradeEntry {
+   double price;
+   int tradeNumber;
+   ulong ticket;
+   bool active;
+};
+
+TradeEntry tradesAbertos[10]; // Suporte para até 10 trades
+int totalTradesAbertos = 0;
+
+// Estrutura para níveis de Pivot
+struct PivotLevels {
+   double p;
+   double r1, r2, r3;
+   double s1, s2, s3;
+   double mr1, mr2, mr3;
+   double ms1, ms2, ms3;
+};
+
+PivotLevels pivots;
+
+// Lista de níveis para monitorar
+struct LevelInfo {
+   double level;
+   string name;
+   bool isResistance;
+   double consolidationHigh;  // 200 pontos acima
+   double consolidationLow;    // 200 pontos abaixo
+   double firstEntry;          // Primeira entrada
+   double nextEntry;           // Próxima entrada
+   int tradeCount;             // Contador de trades neste nível
+   bool activated;              // Nível ativado
+   bool monitoring;
+};
+
+LevelInfo levels[20];
+int totalLevels = 0;
+
+// Estrutura para controle de posições
+struct PositionInfo {
+   ulong ticket;
+   double entryPrice;
+   double initialSL;
+   double currentSL;
+   double bestPrice;
+   int direction; // 1=compra, -1=venda
+   bool trailingActive;
+   int trailingStepCount;
+   int tradeNumber; // Número do trade (1-5)
+};
+
+PositionInfo openPositions[50];
+int totalPositions = 0;
+
+// Variáveis de estado
+enum ENUM_EA_STATE {
+   STATE_WAITING,           // Aguardando atualização dos níveis
+   STATE_MONITORING         // Monitorando níveis
+};
+
+ENUM_EA_STATE eaState = STATE_WAITING;
+
+//+------------------------------------------------------------------+
+//| Expert initialization function                                   |
+//+------------------------------------------------------------------+
+int OnInit()
+{
+   tickSize = SymbolInfoDouble(_Symbol, SYMBOL_TRADE_TICK_SIZE);
+   accountCurrency = AccountInfoString(ACCOUNT_CURRENCY);
+   
+   entryStep = DistanciaEntreEntradas * tickSize * 10;
+   consolidationDistance = DistanciaConsolidacao * tickSize * 10;
+   stopLossSize = StopLossPontos * tickSize * 10;
+   trailingActivation = TrailingAtivacaoPontos * tickSize * 10;
+   trailingStep = TrailingStepPontos * tickSize * 10;
+   trailingMove = (StopLossPontos * TrailingPercentual / 100.0) * tickSize * 10;
+   
+   Print("=== EA: ROMPIMENTO DA CONSOLIDAÇÃO ===");
+   Print("Distância consolidação: ", DistanciaConsolidacao, " pontos");
+   Print("Entradas sequenciais a cada: ", DistanciaEntreEntradas, " pontos");
+   Print("Máximo de TRADES por consolidação: ", MaximoTrades);
+   Print("Stop Loss: ", StopLossPontos, " pontos");
+   Print("Fechamento parcial se preço retornar à entrada");
+   Print("=======================================");
+   
+   return(INIT_SUCCEEDED);
+}
+
+//+------------------------------------------------------------------+
+//| Função para calcular Pivot Points                                |
+//+------------------------------------------------------------------+
+void CalculatePivotLevels()
+{
+   double high = iHigh(_Symbol, PERIOD_D1, 1);
+   double low = iLow(_Symbol, PERIOD_D1, 1);
+   double close = iClose(_Symbol, PERIOD_D1, 1);
+   
+   pivots.p = (high + low + close) / 3;
+   pivots.r1 = (2 * pivots.p) - low;
+   pivots.r2 = pivots.p + (high - low);
+   pivots.r3 = pivots.r1 + (high - low);
+   pivots.s1 = (2 * pivots.p) - high;
+   pivots.s2 = pivots.p - (high - low);
+   pivots.s3 = pivots.s1 - (high - low);
+   pivots.mr1 = (pivots.p + pivots.r1) / 2;
+   pivots.mr2 = (pivots.r1 + pivots.r2) / 2;
+   pivots.mr3 = (pivots.r2 + pivots.r3) / 2;
+   pivots.ms1 = (pivots.p + pivots.s1) / 2;
+   pivots.ms2 = (pivots.s1 + pivots.s2) / 2;
+   pivots.ms3 = (pivots.s2 + pivots.s3) / 2;
+}
+
+//+------------------------------------------------------------------+
+//| Função para configurar níveis                                    |
+//+------------------------------------------------------------------+
+void SetupLevels()
+{
+   totalLevels = 0;
+   
+   if(MonitorarR3) { AddLevel(pivots.r3, "R3", true); }
+   if(MonitorarMR3) { AddLevel(pivots.mr3, "MR3", true); }
+   if(MonitorarR2) { AddLevel(pivots.r2, "R2", true); }
+   if(MonitorarMR2) { AddLevel(pivots.mr2, "MR2", true); }
+   if(MonitorarR1) { AddLevel(pivots.r1, "R1", true); }
+   if(MonitorarMR1) { AddLevel(pivots.mr1, "MR1", true); }
+   if(MonitorarP) { AddLevel(pivots.p, "P", true); }
+   if(MonitorarMS1) { AddLevel(pivots.ms1, "MS1", false); }
+   if(MonitorarS1) { AddLevel(pivots.s1, "S1", false); }
+   if(MonitorarMS2) { AddLevel(pivots.ms2, "MS2", false); }
+   if(MonitorarS2) { AddLevel(pivots.s2, "S2", false); }
+   if(MonitorarMS3) { AddLevel(pivots.ms3, "MS3", false); }
+   if(MonitorarS3) { AddLevel(pivots.s3, "S3", false); }
+   
+   Print(">>> ", totalLevels, " níveis configurados");
+}
+
+//+------------------------------------------------------------------+
+//| Função para adicionar nível                                      |
+//+------------------------------------------------------------------+
+void AddLevel(double level, string name, bool isResistance)
+{
+   levels[totalLevels].level = level;
+   levels[totalLevels].name = name;
+   levels[totalLevels].isResistance = isResistance;
+   levels[totalLevels].consolidationHigh = level + consolidationDistance;
+   levels[totalLevels].consolidationLow = level - consolidationDistance;
+   levels[totalLevels].activated = false;
+   levels[totalLevels].monitoring = true;
+   levels[totalLevels].tradeCount = 0;
+   totalLevels++;
+}
+
+//+------------------------------------------------------------------+
+//| Função para atualizar posições                                   |
+//+------------------------------------------------------------------+
+void UpdatePositionsList()
+{
+   totalPositions = 0;
+   hasPosition = false;
+   currentDirection = DIR_NONE;
+   totalTradesAbertos = 0;
+   
+   for(int i = PositionsTotal() - 1; i >= 0; i--)
+   {
+      ulong ticket = PositionGetTicket(i);
+      if(PositionSelectByTicket(ticket))
+      {
+         if(PositionGetString(POSITION_SYMBOL) == _Symbol &&
+            PositionGetInteger(POSITION_MAGIC) == MagicNumber)
+         {
+            openPositions[totalPositions].ticket = ticket;
+            openPositions[totalPositions].entryPrice = PositionGetDouble(POSITION_PRICE_OPEN);
+            openPositions[totalPositions].initialSL = PositionGetDouble(POSITION_SL);
+            openPositions[totalPositions].currentSL = openPositions[totalPositions].initialSL;
+            
+            long type = PositionGetInteger(POSITION_TYPE);
+            if(type == POSITION_TYPE_BUY)
+            {
+               openPositions[totalPositions].direction = 1;
+               currentDirection = DIR_BUY;
+            }
+            else
+            {
+               openPositions[totalPositions].direction = -1;
+               currentDirection = DIR_SELL;
+            }
+            
+            openPositions[totalPositions].bestPrice = openPositions[totalPositions].entryPrice;
+            openPositions[totalPositions].trailingActive = false;
+            openPositions[totalPositions].trailingStepCount = 0;
+            
+            // Extrair número do trade do comentário
+            string comment = PositionGetString(POSITION_COMMENT);
+            int tradeNum = 1; // default
+            if(StringFind(comment, "C") >= 0 || StringFind(comment, "V") >= 0)
+            {
+               tradeNum = (int)StringSubstr(comment, 2, 1);
+            }
+            openPositions[totalPositions].tradeNumber = tradeNum;
+            
+            // Armazenar no array de trades abertos
+            if(totalTradesAbertos < 10)
+            {
+               tradesAbertos[totalTradesAbertos].price = openPositions[totalPositions].entryPrice;
+               tradesAbertos[totalTradesAbertos].tradeNumber = tradeNum;
+               tradesAbertos[totalTradesAbertos].ticket = ticket;
+               tradesAbertos[totalTradesAbertos].active = true;
+               totalTradesAbertos++;
+            }
+            
+            totalPositions++;
+            hasPosition = true;
+         }
+      }
+   }
+}
+
+//+------------------------------------------------------------------+
+//| Função para verificar retorno ao preço de entrada               |
+//+------------------------------------------------------------------+
+void CheckPriceReturn()
+{
+   if(totalPositions == 0) return;
+   if(activatedLevelIndex < 0) return;
+   
+   double bid = SymbolInfoDouble(_Symbol, SYMBOL_BID);
+   double ask = SymbolInfoDouble(_Symbol, SYMBOL_ASK);
+   
+   for(int i = 0; i < totalTradesAbertos; i++)
+   {
+      if(!tradesAbertos[i].active) continue;
+      
+      // Pular o primeiro trade (trade 1) - só fechar trades adicionais (2,3,4,5)
+      if(tradesAbertos[i].tradeNumber == 1) continue;
+      
+      ulong ticket = tradesAbertos[i].ticket;
+      if(!PositionSelectByTicket(ticket)) continue;
+      
+      long type = PositionGetInteger(POSITION_TYPE);
+      double entryPrice = tradesAbertos[i].price;
+      double currentPrice = (type == POSITION_TYPE_BUY) ? bid : ask;
+      
+      // Verificar se preço retornou ao valor de entrada
+      bool shouldClose = false;
+      
+      if(type == POSITION_TYPE_BUY)
+      {
+         // Para COMPRA: se preço atual <= preço de entrada
+         if(currentPrice <= entryPrice)
+         {
+            shouldClose = true;
+         }
+      }
+      else // VENDA
+      {
+         // Para VENDA: se preço atual >= preço de entrada
+         if(currentPrice >= entryPrice)
+         {
+            shouldClose = true;
+         }
+      }
+      
+      if(shouldClose)
+      {
+         Print(">>> TRADE #", tradesAbertos[i].tradeNumber, " FECHADO - Preço retornou à entrada");
+         Print("Entrada: ", entryPrice, " | Atual: ", currentPrice);
+         
+         // Fechar a posição
+         ClosePosition(ticket);
+         
+         // Marcar como inativo
+         tradesAbertos[i].active = false;
+         
+         // Decrementar contador de trades do nível
+         if(activatedLevelIndex >= 0)
+         {
+            levels[activatedLevelIndex].tradeCount--;
+            tradesFeitos--;
+            Print("Trades restantes no nível: ", levels[activatedLevelIndex].tradeCount);
+         }
+      }
+   }
+}
+
+//+------------------------------------------------------------------+
+//| Função para aplicar trailing stop                                |
+//+------------------------------------------------------------------+
+void ApplyTrailingStop()
+{
+   if(!UsarTrailingStop || totalPositions == 0) return;
+   
+   double bid = SymbolInfoDouble(_Symbol, SYMBOL_BID);
+   double ask = SymbolInfoDouble(_Symbol, SYMBOL_ASK);
+   
+   for(int i = 0; i < totalPositions; i++)
+   {
+      ulong ticket = openPositions[i].ticket;
+      if(!PositionSelectByTicket(ticket)) continue;
+      
+      double currentSL = PositionGetDouble(POSITION_SL);
+      double currentPrice = (openPositions[i].direction == 1) ? bid : ask;
+      
+      if(openPositions[i].direction == 1)
+      {
+         if(currentPrice > openPositions[i].bestPrice)
+            openPositions[i].bestPrice = currentPrice;
+      }
+      else
+      {
+         if(currentPrice < openPositions[i].bestPrice)
+            openPositions[i].bestPrice = currentPrice;
+      }
+      
+      double profitPoints = 0;
+      if(openPositions[i].direction == 1)
+         profitPoints = (openPositions[i].bestPrice - openPositions[i].entryPrice) / (tickSize * 10);
+      else
+         profitPoints = (openPositions[i].entryPrice - openPositions[i].bestPrice) / (tickSize * 10);
+      
+      if(!openPositions[i].trailingActive && profitPoints >= TrailingAtivacaoPontos)
+      {
+         openPositions[i].trailingActive = true;
+         Print(">>> TRAILING ATIVADO - Pos ", ticket, " | Lucro: ", profitPoints, " pts");
+      }
+      
+      if(openPositions[i].trailingActive)
+      {
+         int currentStep = (int)(profitPoints / TrailingStepPontos);
+         
+         if(currentStep > openPositions[i].trailingStepCount)
+         {
+            double newSL = 0;
+            
+            if(openPositions[i].direction == 1)
+            {
+               newSL = openPositions[i].bestPrice - (stopLossSize - (trailingMove * currentStep));
+               if(newSL > currentSL && newSL < currentPrice)
+               {
+                  ModifyPositionSL(ticket, newSL);
+                  openPositions[i].currentSL = newSL;
+                  openPositions[i].trailingStepCount = currentStep;
+                  Print(">>> TRAILING MOVIDO - Pos ", ticket, " | Step ", currentStep);
+               }
+            }
+            else
+            {
+               newSL = openPositions[i].bestPrice + (stopLossSize - (trailingMove * currentStep));
+               if(newSL < currentSL && newSL > currentPrice)
+               {
+                  ModifyPositionSL(ticket, newSL);
+                  openPositions[i].currentSL = newSL;
+                  openPositions[i].trailingStepCount = currentStep;
+                  Print(">>> TRAILING MOVIDO - Pos ", ticket, " | Step ", currentStep);
+               }
+            }
+         }
+      }
+   }
+}
+
+//+------------------------------------------------------------------+
+//| Função para modificar SL                                         |
+//+------------------------------------------------------------------+
+void ModifyPositionSL(ulong ticket, double newSL)
+{
+   MqlTradeRequest request;
+   MqlTradeResult result;
+   ZeroMemory(request);
+   ZeroMemory(result);
+   
+   request.action = TRADE_ACTION_SLTP;
+   request.position = ticket;
+   request.symbol = _Symbol;
+   request.sl = NormalizeDouble(newSL, _Digits);
+   request.tp = 0;
+   request.magic = MagicNumber;
+   
+   OrderSend(request, result);
+}
+
+//+------------------------------------------------------------------+
+//| Função para calcular lucro total                                 |
+//+------------------------------------------------------------------+
+double CalculateTotalProfit()
+{
+   double total = 0;
+   for(int i = PositionsTotal() - 1; i >= 0; i--)
+   {
+      ulong ticket = PositionGetTicket(i);
+      if(PositionSelectByTicket(ticket))
+      {
+         if(PositionGetString(POSITION_SYMBOL) == _Symbol &&
+            PositionGetInteger(POSITION_MAGIC) == MagicNumber)
+         {
+            total += PositionGetDouble(POSITION_PROFIT);
+         }
+      }
+   }
+   return total;
+}
+
+//+------------------------------------------------------------------+
+//| Função para fechar posição                                       |
+//+------------------------------------------------------------------+
+void ClosePosition(ulong ticket)
+{
+   MqlTradeRequest request;
+   MqlTradeResult result;
+   ZeroMemory(request);
+   ZeroMemory(result);
+   
+   if(!PositionSelectByTicket(ticket))
+   {
+      Print("Erro: Posição ", ticket, " não encontrada");
+      return;
+   }
+   
+   request.action = TRADE_ACTION_DEAL;
+   request.position = ticket;
+   request.symbol = _Symbol;
+   request.volume = PositionGetDouble(POSITION_VOLUME);
+   request.deviation = Slippage;
+   request.magic = MagicNumber;
+   
+   long type = PositionGetInteger(POSITION_TYPE);
+   if(type == POSITION_TYPE_BUY)
+   {
+      request.price = SymbolInfoDouble(_Symbol, SYMBOL_BID);
+      request.type = ORDER_TYPE_SELL;
+   }
+   else
+   {
+      request.price = SymbolInfoDouble(_Symbol, SYMBOL_ASK);
+      request.type = ORDER_TYPE_BUY;
+   }
+   
+   if(!OrderSend(request, result))
+   {
+      Print("Erro ao fechar posição ", ticket, ": ", GetLastError());
+   }
+}
+
+//+------------------------------------------------------------------+
+//| Função para fechar todas as posições                            |
+//+------------------------------------------------------------------+
+void CloseAllPositions()
+{
+   for(int i = PositionsTotal() - 1; i >= 0; i--)
+   {
+      ulong ticket = PositionGetTicket(i);
+      if(PositionSelectByTicket(ticket))
+      {
+         if(PositionGetString(POSITION_SYMBOL) == _Symbol &&
+            PositionGetInteger(POSITION_MAGIC) == MagicNumber)
+         {
+            ClosePosition(ticket);
+         }
+      }
+   }
+}
+
+//+------------------------------------------------------------------+
+//| Função para enviar ordem de COMPRA                               |
+//+------------------------------------------------------------------+
+void SendBuyOrder(double price, string levelName, int tradeNum)
+{
+   MqlTradeRequest request;
+   MqlTradeResult result;
+   ZeroMemory(request);
+   ZeroMemory(result);
+   
+   double stopLoss = price - stopLossSize;
+   
+   request.action = TRADE_ACTION_DEAL;
+   request.type = ORDER_TYPE_BUY;
+   request.symbol = _Symbol;
+   request.volume = VolumePorEntrada;
+   request.price = NormalizeDouble(price, _Digits);
+   request.sl = NormalizeDouble(stopLoss, _Digits);
+   request.tp = 0;
+   request.deviation = Slippage;
+   request.magic = MagicNumber;
+   request.comment = levelName + " C" + IntegerToString(tradeNum);
+   
+   if(OrderSend(request, result))
+   {
+      tradesFeitos++;
+      Print(">>> COMPRA #", tradeNum, "/", MaximoTrades, " em ", price, " | SL: ", stopLoss);
+   }
+   else
+   {
+      Print("Erro COMPRA: ", GetLastError());
+   }
+}
+
+//+------------------------------------------------------------------+
+//| Função para enviar ordem de VENDA                                |
+//+------------------------------------------------------------------+
+void SendSellOrder(double price, string levelName, int tradeNum)
+{
+   MqlTradeRequest request;
+   MqlTradeResult result;
+   ZeroMemory(request);
+   ZeroMemory(result);
+   
+   double stopLoss = price + stopLossSize;
+   
+   request.action = TRADE_ACTION_DEAL;
+   request.type = ORDER_TYPE_SELL;
+   request.symbol = _Symbol;
+   request.volume = VolumePorEntrada;
+   request.price = NormalizeDouble(price, _Digits);
+   request.sl = NormalizeDouble(stopLoss, _Digits);
+   request.tp = 0;
+   request.deviation = Slippage;
+   request.magic = MagicNumber;
+   request.comment = levelName + " V" + IntegerToString(tradeNum);
+   
+   if(OrderSend(request, result))
+   {
+      tradesFeitos++;
+      Print(">>> VENDA #", tradeNum, "/", MaximoTrades, " em ", price, " | SL: ", stopLoss);
+   }
+   else
+   {
+      Print("Erro VENDA: ", GetLastError());
+   }
+}
+
+//+------------------------------------------------------------------+
+//| Função para resetar                                             |
+//+------------------------------------------------------------------+
+void ResetTrade()
+{
+   hasPosition = false;
+   currentDirection = DIR_NONE;
+   activatedLevelIndex = -1;
+   tradesFeitos = 0;
+   nextEntryPrice = 0;
+   totalTradesAbertos = 0;
+   
+   for(int i = 0; i < totalLevels; i++)
+   {
+      levels[i].activated = false;
+      levels[i].monitoring = true;
+      levels[i].tradeCount = 0;
+   }
+}
+
+//+------------------------------------------------------------------+
+//| Expert tick function                                             |
+//+------------------------------------------------------------------+
+void OnTick()
+{
+   // Atualizar posições
+   UpdatePositionsList();
+   
+   // Verificar retorno ao preço de entrada (fechar trades adicionais)
+   CheckPriceReturn();
+   
+   // Aplicar trailing stop
+   ApplyTrailingStop();
+   
+   // Verificar metas
+   double totalProfit = CalculateTotalProfit();
+   if(totalProfit >= MetaLucro)
+   {
+      Print(">>> META DE LUCRO ATINGIDA! ", totalProfit, " ", accountCurrency);
+      CloseAllPositions();
+      ResetTrade();
+   }
+   else if(totalProfit <= -StopLossGeral)
+   {
+      Print(">>> STOP LOSS GERAL ATINGIDO! ", totalProfit, " ", accountCurrency);
+      CloseAllPositions();
+      ResetTrade();
+   }
+   
+   // Se não tem posições, resetar
+   if(totalPositions == 0 && hasPosition)
+   {
+      ResetTrade();
+   }
+   
+   // Atualizar pivots diariamente
+   datetime currentTime = TimeCurrent();
+   MqlDateTime today;
+   TimeToStruct(currentTime, today);
+   today.hour = 0;
+   today.min = 0;
+   today.sec = 0;
+   datetime todayStart = StructToTime(today);
+   
+   if(lastPivotUpdate < todayStart)
+   {
+      CalculatePivotLevels();
+      SetupLevels();
+      lastPivotUpdate = currentTime;
+      eaState = STATE_MONITORING;
+      Print(">>> NOVOS PIVOTS CALCULADOS");
+   }
+   
+   double bid = SymbolInfoDouble(_Symbol, SYMBOL_BID);
+   double ask = SymbolInfoDouble(_Symbol, SYMBOL_ASK);
+   
+   // ========== SE TEM POSIÇÃO, VERIFICAR NOVOS TRADES ==========
+   if(hasPosition && activatedLevelIndex >= 0)
+   {
+      int idx = activatedLevelIndex;
+      
+      // VERIFICAÇÃO CRÍTICA: Já atingiu o máximo de trades?
+      if(levels[idx].tradeCount >= MaximoTrades)
+      {
+         // Já atingiu o limite, não faz mais nada
+      }
+      else if(currentDirection == DIR_BUY) // COMPRAS - buscar próximos níveis MAIS ALTOS
+      {
+         if(ask >= nextEntryPrice)
+         {
+            // Verificar se não vai ultrapassar o limite
+            if(levels[idx].tradeCount + 1 <= MaximoTrades)
+            {
+               int nextTradeNum = levels[idx].tradeCount + 1;
+               SendBuyOrder(ask, levels[idx].name, nextTradeNum);
+               levels[idx].tradeCount++;
+               nextEntryPrice += entryStep;
+               
+               if(levels[idx].tradeCount >= MaximoTrades)
+                  Print(">>> LIMITE MÁXIMO DE ", MaximoTrades, " TRADES ATINGIDO PARA ", levels[idx].name);
+            }
+         }
+      }
+      else if(currentDirection == DIR_SELL) // VENDAS - buscar próximos níveis MAIS BAIXOS
+      {
+         if(bid <= nextEntryPrice)
+         {
+            // Verificar se não vai ultrapassar o limite
+            if(levels[idx].tradeCount + 1 <= MaximoTrades)
+            {
+               int nextTradeNum = levels[idx].tradeCount + 1;
+               SendSellOrder(bid, levels[idx].name, nextTradeNum);
+               levels[idx].tradeCount++;
+               nextEntryPrice -= entryStep;
+               
+               if(levels[idx].tradeCount >= MaximoTrades)
+                  Print(">>> LIMITE MÁXIMO DE ", MaximoTrades, " TRADES ATINGIDO PARA ", levels[idx].name);
+            }
+         }
+      }
+   }
+   
+   // ========== SE NÃO TEM POSIÇÃO, MONITORAR ROMPIMENTOS ==========
+   if(!hasPosition)
+   {
+      for(int i = 0; i < totalLevels; i++)
+      {
+         if(!levels[i].monitoring || levels[i].activated) continue;
+         
+         // ROMPIMENTO PARA CIMA - COMPRA
+         if(ask >= levels[i].consolidationHigh)
+         {
+            Print(">>> ROMPIMENTO PARA CIMA - ", levels[i].name);
+            Print("Zona: ", DoubleToString(levels[i].consolidationLow, _Digits), 
+                  " - ", DoubleToString(levels[i].consolidationHigh, _Digits));
+            Print("Preço ASK: ", ask);
+            
+            // CONFIGURAR NÍVEL ATIVADO
+            levels[i].activated = true;
+            levels[i].tradeCount = 0;
+            activatedLevelIndex = i;
+            currentDirection = DIR_BUY;
+            hasPosition = true;
+            
+            // EXECUTAR PRIMEIRA COMPRA
+            double entryPrice = ask;
+            nextEntryPrice = entryPrice + entryStep;
+            
+            Print(">>> EXECUTANDO 1º TRADE (COMPRA)");
+            SendBuyOrder(entryPrice, levels[i].name, 1);
+            levels[i].tradeCount = 1;
+            
+            break;
+         }
+         
+         // ROMPIMENTO PARA BAIXO - VENDA
+         else if(bid <= levels[i].consolidationLow)
+         {
+            Print(">>> ROMPIMENTO PARA BAIXO - ", levels[i].name);
+            Print("Zona: ", DoubleToString(levels[i].consolidationLow, _Digits), 
+                  " - ", DoubleToString(levels[i].consolidationHigh, _Digits));
+            Print("Preço BID: ", bid);
+            
+            // CONFIGURAR NÍVEL ATIVADO
+            levels[i].activated = true;
+            levels[i].tradeCount = 0;
+            activatedLevelIndex = i;
+            currentDirection = DIR_SELL;
+            hasPosition = true;
+            
+            // EXECUTAR PRIMEIRA VENDA
+            double entryPrice = bid;
+            nextEntryPrice = entryPrice - entryStep;
+            
+            Print(">>> EXECUTANDO 1º TRADE (VENDA)");
+            SendSellOrder(entryPrice, levels[i].name, 1);
+            levels[i].tradeCount = 1;
+            
+            break;
+         }
+      }
+   }
+   
+   // Status no chart
+   string status = "";
+   if(hasPosition)
+   {
+      status = "POSIÇÃO: " + (currentDirection == DIR_BUY ? "COMPRA" : "VENDA");
+      status += " | Nível: " + (activatedLevelIndex >= 0 ? levels[activatedLevelIndex].name : "");
+      status += " | TRADES: " + (activatedLevelIndex >= 0 ? IntegerToString(levels[activatedLevelIndex].tradeCount) : "0");
+      status += "/" + IntegerToString(MaximoTrades);
+      if(activatedLevelIndex >= 0 && levels[activatedLevelIndex].tradeCount < MaximoTrades)
+      {
+         status += " | Próx: " + DoubleToString(nextEntryPrice, _Digits);
+      }
+   }
+   else
+   {
+      status = "AGUARDANDO CONSOLIDAÇÃO | Níveis ativos: " + IntegerToString(totalLevels);
+   }
+   status += " | Lucro: " + DoubleToString(totalProfit, 2);
+   Comment(status);
+}
