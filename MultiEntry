@@ -223,6 +223,24 @@ void AddLevel(double level, string name, bool isResistance)
 }
 
 //+------------------------------------------------------------------+
+//| Função para extrair o número do trade do comentário             |
+//+------------------------------------------------------------------+
+int ExtractTradeNumber(string comment)
+{
+   int cPos = StringFind(comment, "C");
+   int vPos = StringFind(comment, "V");
+   int markerPos = cPos >= 0 ? cPos : vPos;
+
+   if(markerPos < 0) return 1;
+
+   string numberText = StringSubstr(comment, markerPos + 1);
+   int tradeNum = (int)StringToInteger(numberText);
+
+   if(tradeNum <= 0) return 1;
+   return tradeNum;
+}
+
+//+------------------------------------------------------------------+
 //| Função para atualizar posições                                   |
 //+------------------------------------------------------------------+
 void UpdatePositionsList()
@@ -283,11 +301,7 @@ void UpdatePositionsList()
             
             // Extrair número do trade do comentário
             string comment = PositionGetString(POSITION_COMMENT);
-            int tradeNum = 1; // default
-            if(StringFind(comment, "C") >= 0 || StringFind(comment, "V") >= 0)
-            {
-               tradeNum = (int)StringSubstr(comment, 2, 1);
-            }
+            int tradeNum = ExtractTradeNumber(comment);
             openPositions[totalPositions].tradeNumber = tradeNum;
             
             // Armazenar no array de trades abertos
@@ -313,7 +327,6 @@ void UpdatePositionsList()
 void CheckPriceReturn()
 {
    if(totalPositions == 0) return;
-   if(activatedLevelIndex < 0) return;
    
    double bid = SymbolInfoDouble(_Symbol, SYMBOL_BID);
    double ask = SymbolInfoDouble(_Symbol, SYMBOL_ASK);
